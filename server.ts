@@ -1,17 +1,39 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createRequire } from 'module';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
-// Safe dynamic imports for document parsers to avoid top-level ESM/CJS load crashes
+
+const require = createRequire(import.meta.url);
+
+// Safe imports for document parsers to avoid top-level ESM/CJS load crashes
 async function parsePdfBuffer(buffer: Buffer): Promise<string> {
   try {
-    // @ts-ignore
-    const pdfParseModule: any = await import('pdf-parse');
-    const pdfParse = pdfParseModule.default || pdfParseModule;
-    const pdfData = await pdfParse(buffer);
-    return pdfData?.text?.trim() || '';
+    let pdfParse: any;
+    try {
+      pdfParse = require('pdf-parse');
+    } catch {
+      const pdfModule: any = await import('pdf-parse');
+      pdfParse = pdfModule;
+    }
+
+    let fn = pdfParse;
+    if (typeof fn !== 'function' && fn?.default) {
+      fn = fn.default;
+    }
+    if (typeof fn !== 'function' && fn?.default) {
+      fn = fn.default;
+    }
+
+    if (typeof fn === 'function') {
+      const pdfData = await fn(buffer);
+      return pdfData?.text?.trim() || '';
+    } else {
+      console.warn('pdf-parse function could not be resolved:', pdfParse);
+      return '';
+    }
   } catch (err) {
     console.warn('pdf-parse text extraction error:', err);
     return '';
@@ -20,11 +42,19 @@ async function parsePdfBuffer(buffer: Buffer): Promise<string> {
 
 async function parseDocxBuffer(buffer: Buffer): Promise<string> {
   try {
-    // @ts-ignore
-    const mammothModule: any = await import('mammoth');
-    const mammoth = mammothModule.default || mammothModule;
-    const result = await mammoth.extractRawText({ buffer });
-    return result?.value?.trim() || '';
+    let mammoth: any;
+    try {
+      mammoth = require('mammoth');
+    } catch {
+      const mModule: any = await import('mammoth');
+      mammoth = mModule;
+    }
+    const mammothObj = mammoth.default || mammoth;
+    if (typeof mammothObj?.extractRawText === 'function') {
+      const result = await mammothObj.extractRawText({ buffer });
+      return result?.value?.trim() || '';
+    }
+    return '';
   } catch (err) {
     console.warn('mammoth text extraction error:', err);
     return '';
@@ -73,11 +103,13 @@ async function extractPlainTextFromFile(fileData?: string, fileName?: string, fi
   return '';
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+export const app = express();
+const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+async function startServer() {
 
   // Initialize Gemini API client lazily or safely on server
   const getGeminiClient = () => {
@@ -98,11 +130,10 @@ async function startServer() {
   // Helper to generate content with fallback models for standard Gemini API keys
   const generateGeminiContent = async (ai: GoogleGenAI, params: { contents: any; config?: any; preferredModel?: string }) => {
     const candidateModels = Array.from(new Set([
-      params.preferredModel || 'gemini-2.5-flash',
-      'gemini-2.5-flash',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
+      params.preferredModel || 'gemini-3.6-flash',
       'gemini-3.6-flash',
+      'gemini-2.5-flash',
+      'gemini-2.5-pro',
     ]));
 
     let lastError: any = null;
@@ -189,7 +220,7 @@ Return JSON matching this exact structure:
       try {
         const ai = getGeminiClient();
         const response = await generateGeminiContent(ai, {
-          preferredModel: 'gemini-2.5-flash',
+          preferredModel: 'gemini-3.6-flash',
           contents: [
             {
               role: 'user',
@@ -309,7 +340,7 @@ Respond STRICTLY in valid JSON matching this schema.`;
       parts.push({ text: promptText });
 
       const response = await generateGeminiContent(ai, {
-        preferredModel: 'gemini-2.5-flash',
+        preferredModel: 'gemini-3.6-flash',
         contents: [
           {
             role: 'user',
@@ -378,7 +409,7 @@ Perform a rigorous analysis and respond STRICTLY in JSON format matching this sc
 
       const ai = getGeminiClient();
       const response = await generateGeminiContent(ai, {
-        preferredModel: 'gemini-2.5-flash',
+        preferredModel: 'gemini-3.6-flash',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
@@ -400,25 +431,31 @@ Perform a rigorous analysis and respond STRICTLY in JSON format matching this sc
   });
 
   // Setup Vite or Static File Serving
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+  if (!process.env.VERCEL) {
+    if (process.env.NODE_ENV !== 'production') {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), 'dist');
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
+
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Server listening at http://0.0.0.0:${PORT}`);
     });
   }
+}
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server listening at http://0.0.0.0:${PORT}`);
+if (!process.env.VERCEL) {
+  startServer().catch((err) => {
+    console.error('Failed to start server:', err);
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
-});
+export default app;
