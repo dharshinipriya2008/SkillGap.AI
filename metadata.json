@@ -1,0 +1,6 @@
+{
+  "name": "SkillGap AI",
+  "description": "AI Skill Gap Analyzer dashboard for students and fresh graduates targeting tech roles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
