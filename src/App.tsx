@@ -8,7 +8,7 @@ import { QuizPage } from './components/QuizPage';
 import { ProjectsPage } from './components/ProjectsPage';
 import { InterviewPracticePage } from './components/InterviewPracticePage';
 import { AIAnalyzerModal } from './components/AIAnalyzerModal';
-import { parseResumeFile } from './utils/resumeParser';
+import { parseResumeFile, parseResumeText } from './utils/resumeParser';
 
 import { Sparkles } from 'lucide-react';
 
@@ -61,6 +61,30 @@ export default function App() {
       console.error('Error parsing resume:', err);
       setIsExtracting(false);
       showToast('Error parsing uploaded resume file.');
+    }
+  };
+
+  // Resume Text Extraction Handler
+  const handleTextUpload = async (text: string) => {
+    setIsExtracting(true);
+    showToast('Parsing explicitly mentioned skills from pasted text...');
+
+    try {
+      const parsed = await parseResumeText(text);
+      setIsExtracting(false);
+      setExtractedResumeData(parsed);
+      setCurrentStep(3);
+
+      const skillCount = parsed.detectedSkills ? parsed.detectedSkills.length : 0;
+      if (skillCount > 0) {
+        showToast(`Extracted ${skillCount} explicit skill${skillCount > 1 ? 's' : ''} from text!`);
+      } else {
+        showToast('Text processed. No explicit technical skills detected.');
+      }
+    } catch (err) {
+      console.error('Error parsing resume text:', err);
+      setIsExtracting(false);
+      showToast('Error parsing pasted resume text.');
     }
   };
 
@@ -131,6 +155,7 @@ export default function App() {
                 isExtracting={isExtracting}
                 isAnalyzed={isAnalyzed}
                 onFileUpload={handleFileUpload}
+                onTextUpload={handleTextUpload}
                 onRunAnalysis={handleRunAnalysis}
                 onResetResume={handleResetResume}
                 onStartNewAnalysis={handleStartNewAnalysis}

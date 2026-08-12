@@ -27,6 +27,7 @@ interface StepWizardFlowProps {
   isExtracting: boolean;
   isAnalyzed: boolean;
   onFileUpload: (file: File) => void;
+  onTextUpload?: (text: string) => void;
   onRunAnalysis: () => void;
   onResetResume: () => void;
   onStartNewAnalysis: () => void;
@@ -43,6 +44,7 @@ export const StepWizardFlow: React.FC<StepWizardFlowProps> = ({
   isExtracting,
   isAnalyzed,
   onFileUpload,
+  onTextUpload,
   onRunAnalysis,
   onResetResume,
   onStartNewAnalysis,
@@ -50,6 +52,8 @@ export const StepWizardFlow: React.FC<StepWizardFlowProps> = ({
 }) => {
   const [dragActive, setDragActive] = useState(false);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
+  const [inputMode, setInputMode] = useState<'file' | 'text'>('file');
+  const [pastedText, setPastedText] = useState('');
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -223,6 +227,36 @@ export const StepWizardFlow: React.FC<StepWizardFlowProps> = ({
           </div>
 
           {!extractedData && !isExtracting && (
+            <div className="flex border-b border-slate-800 space-x-6 text-xs font-mono">
+              <button
+                type="button"
+                onClick={() => setInputMode('file')}
+                className={`pb-3 font-bold border-b-2 transition-all flex items-center space-x-2 cursor-pointer ${
+                  inputMode === 'file'
+                    ? 'border-cyan-400 text-cyan-300'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <UploadCloud className="h-4 w-4" />
+                <span>Upload File (.pdf, .docx)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setInputMode('text')}
+                className={`pb-3 font-bold border-b-2 transition-all flex items-center space-x-2 cursor-pointer ${
+                  inputMode === 'text'
+                    ? 'border-cyan-400 text-cyan-300'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <FileText className="h-4 w-4" />
+                <span>Paste Resume Text</span>
+              </button>
+            </div>
+          )}
+
+          {!extractedData && !isExtracting && inputMode === 'file' && (
             <div
               onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
               onDragLeave={() => setDragActive(false)}
@@ -257,6 +291,29 @@ export const StepWizardFlow: React.FC<StepWizardFlowProps> = ({
                 <FileText className="h-4 w-4" />
                 <span>Upload Resume</span>
               </label>
+            </div>
+          )}
+
+          {!extractedData && !isExtracting && inputMode === 'text' && (
+            <div className="space-y-4">
+              <textarea
+                value={pastedText}
+                onChange={(e) => setPastedText(e.target.value)}
+                placeholder="Paste your full resume text here (e.g. Skills, Education, Projects, Work Experience)..."
+                rows={8}
+                className="w-full rounded-2xl border border-slate-800 bg-slate-950/80 p-4 text-xs font-mono text-slate-100 placeholder-slate-500 focus:border-cyan-500 focus:outline-none focus:ring-1 focus:ring-cyan-500"
+              />
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  disabled={!pastedText.trim()}
+                  onClick={() => onTextUpload && onTextUpload(pastedText)}
+                  className="inline-flex items-center space-x-2 rounded-xl bg-gradient-to-r from-cyan-500 to-indigo-600 px-6 py-2.5 text-xs font-extrabold text-white shadow-lg hover:scale-105 disabled:opacity-40 transition-all cursor-pointer"
+                >
+                  <Sparkles className="h-4 w-4" />
+                  <span>Parse Resume Text</span>
+                </button>
+              </div>
             </div>
           )}
 

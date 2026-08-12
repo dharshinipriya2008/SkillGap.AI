@@ -225,20 +225,31 @@ export async function parseResumeFile(file: File): Promise<ExtractedResumeData> 
         const d = json.data;
 
         // Deduplicate and sanitize all extracted skills
-        const rawSkills = [
+        let rawSkills = [
           ...(d.detectedSkills || []),
           ...(d.programmingLanguages || []),
           ...(d.toolsAndTechnologies || [])
         ];
-        const uniqueSkills = deduplicateSkills(rawSkills);
+        let uniqueSkills = deduplicateSkills(rawSkills);
+        let evidenceMap = d.skillEvidence || {};
+        const rawText = d.rawResumeText || '';
 
-        const progLangs = deduplicateSkills(d.programmingLanguages || []);
-        const toolsTech = deduplicateSkills(d.toolsAndTechnologies || []);
+        // If backend returned clean raw text but no structured skills, run client extraction on rawText
+        if (uniqueSkills.length === 0 && rawText.trim().length > 30) {
+          const clientExtract = extractSkillsWithEvidenceClient(rawText);
+          uniqueSkills = clientExtract.skills;
+          evidenceMap = clientExtract.evidenceMap;
+        }
+
+        const progLangs = deduplicateSkills(d.programmingLanguages?.length ? d.programmingLanguages : uniqueSkills.filter(s =>
+          ['Python', 'SQL', 'JavaScript', 'TypeScript', 'Java', 'C++', 'C#', 'C', 'R', 'Go', 'Rust', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'HTML', 'CSS', 'Bash', 'MATLAB', 'Scala'].includes(s)
+        ));
+        const toolsTech = deduplicateSkills(d.toolsAndTechnologies?.length ? d.toolsAndTechnologies : uniqueSkills.filter(s => !progLangs.includes(s)));
 
         return {
-          rawResumeText: d.rawResumeText || '',
+          rawResumeText: rawText,
           detectedSkills: uniqueSkills,
-          skillEvidence: d.skillEvidence || {},
+          skillEvidence: evidenceMap,
           programmingLanguages: progLangs,
           toolsAndTechnologies: toolsTech,
           education: Array.isArray(d.education) ? d.education : [],
@@ -250,36 +261,57 @@ export async function parseResumeFile(file: File): Promise<ExtractedResumeData> 
       }
     }
   } catch (err) {
-    console.warn('Backend resume extraction call failed, attempting client fallback:', err);
+    console.warn('Backend resume extraction call failed:', err);
   }
 
-  // Client-side fallback if backend API fails or plain text file
-  try {
-    const rawText = await file.text();
-    const cleanText = rawText.replace(/[^\x20-\x7E\n\r\t]/g, ' ');
-    const { skills, evidenceMap } = extractSkillsWithEvidenceClient(cleanText);
+  // Client-side fallback: Only attempt plain text parsing for non-binary files or plain text
+  if (file.type?.startsWith('text/') || file.name?.endsWith('.txt') || file.name?.endsWith('.md')) {
+    try {
+      const rawText = await file.text();
+      const cleanText = rawText.replace(/[^\x20-\x7E\n\r\t]/g, ' ');
+      const { skills, evidenceMap } = extractSkillsWithEvidenceClient(cleanText);
 
-    const progLangs = skills.filter(s =>
-      ['Python', 'SQL', 'JavaScript', 'TypeScript', 'Java', 'C++', 'C#', 'C', 'R', 'Go', 'Rust', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'HTML', 'CSS', 'Bash', 'MATLAB', 'Scala'].includes(s)
-    );
-    const toolsTech = skills.filter(s => !progLangs.includes(s));
+      const progLangs = skills.filter(s =>
+        ['Python', 'SQL', 'JavaScript', 'TypeScript', 'Java', 'C++', 'C#', 'C', 'R', 'Go', 'Rust', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'HTML', 'CSS', 'Bash', 'MATLAB', 'Scala'].includes(s)
+      );
+      const toolsTech = skills.filter(s => !progLangs.includes(s));
 
-    const isTextReadable = cleanText.trim().length > 30 && skills.length > 0;
+      return {
+        rawResumeText: cleanText,
+        detectedSkills: skills,
+        skillEvidence: evidenceMap,
+        programmingLanguages: progLangs,
+        toolsAndTechnologies: toolsTech,
+        education: [],
+        projects: [],
+        certifications: [],
+        experience: [],
+        unreliableExtractMessage: skills.length === 0 ? 'Unable to extract technical skills from text file.' : undefined,
+      };
+    } catch (err) {
+      console.error('Failed to parse file text client-side:', err);
+    }
+  }
 
-    return {
-      rawResumeText: cleanText,
-      detectedSkills: skills,
-      skillEvidence: evidenceMap,
-      programmingLanguages: progLangs,
-      toolsAndTechnologies: toolsTech,
-      education: [],
-      projects: [],
-      certifications: [],
-      experience: [],
-      unreliableExtractMessage: !isTextReadable ? 'Unable to reliably extract this section. Please re-upload the resume.' : undefined,
-    };
-  } catch (err) {
-    console.error('Failed to parse file text client-side:', err);
+  return {
+    rawResumeText: '',
+    detectedSkills: [],
+    skillEvidence: {},
+    programmingLanguages: [],
+    toolsAndTechnologies: [],
+    education: [],
+    projects: [],
+    certifications: [],
+    experience: [],
+    unreliableExtractMessage: 'Unable to extract text from file. Please paste your resume text directly.',
+  };
+}
+
+/**
+ * PARSE DIRECT RESUME TEXT INPUT
+ */
+export async function parseResumeText(resumeText: string): Promise<ExtractedResumeData> {
+  if (!resumeText || resumeText.trim().length === 0) {
     return {
       rawResumeText: '',
       detectedSkills: [],
@@ -290,7 +322,73 @@ export async function parseResumeFile(file: File): Promise<ExtractedResumeData> 
       projects: [],
       certifications: [],
       experience: [],
-      unreliableExtractMessage: 'Unable to reliably extract this section. Please re-upload the resume.',
     };
   }
+
+  try {
+    const res = await fetch('/api/extract-resume-raw', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resumeText }),
+    });
+
+    if (res.ok) {
+      const json = await res.json();
+      if (json.success && json.data) {
+        const d = json.data;
+        let uniqueSkills = deduplicateSkills([
+          ...(d.detectedSkills || []),
+          ...(d.programmingLanguages || []),
+          ...(d.toolsAndTechnologies || [])
+        ]);
+
+        let evidenceMap = d.skillEvidence || {};
+        const rawText = d.rawResumeText || resumeText;
+
+        if (uniqueSkills.length === 0 && rawText.trim().length > 0) {
+          const clientExtract = extractSkillsWithEvidenceClient(rawText);
+          uniqueSkills = clientExtract.skills;
+          evidenceMap = clientExtract.evidenceMap;
+        }
+
+        const progLangs = deduplicateSkills(d.programmingLanguages?.length ? d.programmingLanguages : uniqueSkills.filter(s =>
+          ['Python', 'SQL', 'JavaScript', 'TypeScript', 'Java', 'C++', 'C#', 'C', 'R', 'Go', 'Rust', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'HTML', 'CSS', 'Bash', 'MATLAB', 'Scala'].includes(s)
+        ));
+        const toolsTech = deduplicateSkills(d.toolsAndTechnologies?.length ? d.toolsAndTechnologies : uniqueSkills.filter(s => !progLangs.includes(s)));
+
+        return {
+          rawResumeText: rawText,
+          detectedSkills: uniqueSkills,
+          skillEvidence: evidenceMap,
+          programmingLanguages: progLangs,
+          toolsAndTechnologies: toolsTech,
+          education: Array.isArray(d.education) ? d.education : [],
+          projects: Array.isArray(d.projects) ? d.projects : [],
+          certifications: Array.isArray(d.certifications) ? d.certifications : [],
+          experience: Array.isArray(d.experience) ? d.experience : [],
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('Text parsing API call failed:', err);
+  }
+
+  // Pure client extraction fallback
+  const { skills, evidenceMap } = extractSkillsWithEvidenceClient(resumeText);
+  const progLangs = skills.filter(s =>
+    ['Python', 'SQL', 'JavaScript', 'TypeScript', 'Java', 'C++', 'C#', 'C', 'R', 'Go', 'Rust', 'Ruby', 'PHP', 'Swift', 'Kotlin', 'HTML', 'CSS', 'Bash', 'MATLAB', 'Scala'].includes(s)
+  );
+  const toolsTech = skills.filter(s => !progLangs.includes(s));
+
+  return {
+    rawResumeText: resumeText,
+    detectedSkills: skills,
+    skillEvidence: evidenceMap,
+    programmingLanguages: progLangs,
+    toolsAndTechnologies: toolsTech,
+    education: [],
+    projects: [],
+    certifications: [],
+    experience: [],
+  };
 }

@@ -4,14 +4,78 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
 import dotenv from 'dotenv';
+// Safe dynamic imports for document parsers to avoid top-level ESM/CJS load crashes
+async function parsePdfBuffer(buffer: Buffer): Promise<string> {
+  try {
+    // @ts-ignore
+    const pdfParseModule: any = await import('pdf-parse');
+    const pdfParse = pdfParseModule.default || pdfParseModule;
+    const pdfData = await pdfParse(buffer);
+    return pdfData?.text?.trim() || '';
+  } catch (err) {
+    console.warn('pdf-parse text extraction error:', err);
+    return '';
+  }
+}
+
+async function parseDocxBuffer(buffer: Buffer): Promise<string> {
+  try {
+    // @ts-ignore
+    const mammothModule: any = await import('mammoth');
+    const mammoth = mammothModule.default || mammothModule;
+    const result = await mammoth.extractRawText({ buffer });
+    return result?.value?.trim() || '';
+  } catch (err) {
+    console.warn('mammoth text extraction error:', err);
+    return '';
+  }
+}
 
 dotenv.config();
 
-const __dirname = process.cwd();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+async function extractPlainTextFromFile(fileData?: string, fileName?: string, fileType?: string, resumeText?: string): Promise<string> {
+  if (resumeText && resumeText.trim().length > 0) {
+    return resumeText.trim();
+  }
+  if (!fileData) return '';
+
+  const base64Clean = fileData.includes('base64,') ? fileData.split('base64,')[1] : fileData;
+  const buffer = Buffer.from(base64Clean, 'base64');
+  const lowerName = (fileName || '').toLowerCase();
+  const lowerType = (fileType || '').toLowerCase();
+
+  // PDF
+  if (lowerName.endsWith('.pdf') || lowerType.includes('pdf')) {
+    const pdfText = await parsePdfBuffer(buffer);
+    if (pdfText) return pdfText;
+  }
+
+  // DOCX / DOC
+  if (lowerName.endsWith('.docx') || lowerName.endsWith('.doc') || lowerType.includes('word') || lowerType.includes('officedocument')) {
+    const docxText = await parseDocxBuffer(buffer);
+    if (docxText) return docxText;
+  }
+
+  // Plain Text / Markdown
+  try {
+    const rawText = buffer.toString('utf-8');
+    const cleanText = rawText.replace(/[^\x20-\x7E\n\r\t]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (cleanText.length > 0) {
+      return cleanText;
+    }
+  } catch (err) {
+    console.warn('UTF-8 text conversion failed:', err);
+  }
+
+  return '';
+}
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
 
   app.use(express.json({ limit: '10mb' }));
 
@@ -19,7 +83,7 @@ async function startServer() {
   const getGeminiClient = () => {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      throw new Error('GEMINI_API_KEY environment variable is missing.');
+      throw new Error('GEMINI_API_KEY environment variable is missing. Please set GEMINI_API_KEY in your environment variables.');
     }
     return new GoogleGenAI({
       apiKey,
@@ -29,6 +93,33 @@ async function startServer() {
         },
       },
     });
+  };
+
+  // Helper to generate content with fallback models for standard Gemini API keys
+  const generateGeminiContent = async (ai: GoogleGenAI, params: { contents: any; config?: any; preferredModel?: string }) => {
+    const candidateModels = Array.from(new Set([
+      params.preferredModel || 'gemini-2.5-flash',
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+      'gemini-3.6-flash',
+    ]));
+
+    let lastError: any = null;
+    for (const modelName of candidateModels) {
+      try {
+        const response = await ai.models.generateContent({
+          model: modelName,
+          contents: params.contents,
+          config: params.config,
+        });
+        return response;
+      } catch (err: any) {
+        console.warn(`Gemini API call failed for model '${modelName}': ${err?.message || err}. Trying next fallback model...`);
+        lastError = err;
+      }
+    }
+    throw lastError || new Error('All Gemini model generation attempts failed.');
   };
 
   // API Health Check
@@ -41,8 +132,11 @@ async function startServer() {
     try {
       const { fileData, fileType, fileName, resumeText } = req.body;
 
+      // Extract clean plain text first using pdf-parse or mammoth
+      const extractedPlainText = await extractPlainTextFromFile(fileData, fileName, fileType, resumeText);
+
       const promptText = `You are a strict, precise AI resume parser.
-Extract content ONLY from the provided resume file/text.
+Extract content ONLY from the provided resume text/file.
 
 STRICT RULES:
 1. Extract exact technical skills, programming languages, frameworks, and tools explicitly mentioned in the resume.
@@ -67,44 +161,76 @@ Return JSON matching this exact structure:
   "skillEvidence": { "Exact Skill 1": "Quote from resume where skill appears" }
 }`;
 
-      const ai = getGeminiClient();
       const parts: any[] = [];
+
+      if (extractedPlainText) {
+        parts.push({ text: `Resume Text Content:\n${extractedPlainText}` });
+      }
 
       if (fileData) {
         const base64Clean = fileData.includes('base64,') ? fileData.split('base64,')[1] : fileData;
-        const mimeType = fileType || (fileName?.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'text/plain');
-        parts.push({
-          inlineData: {
-            mimeType,
-            data: base64Clean,
-          },
-        });
-      } else if (resumeText) {
-        parts.push({ text: `Resume Content:\n${resumeText}` });
-      } else {
-        return res.status(400).json({ error: 'Either fileData or resumeText must be provided.' });
+        const isPdf = fileName?.toLowerCase().endsWith('.pdf') || fileType?.toLowerCase().includes('pdf');
+        if (isPdf) {
+          parts.push({
+            inlineData: {
+              mimeType: 'application/pdf',
+              data: base64Clean,
+            },
+          });
+        }
+      }
+
+      if (parts.length === 0) {
+        return res.status(400).json({ error: 'Either valid fileData or resumeText must be provided.' });
       }
 
       parts.push({ text: promptText });
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
-        contents: [
-          {
-            role: 'user',
-            parts,
+      try {
+        const ai = getGeminiClient();
+        const response = await generateGeminiContent(ai, {
+          preferredModel: 'gemini-2.5-flash',
+          contents: [
+            {
+              role: 'user',
+              parts,
+            },
+          ],
+          config: {
+            responseMimeType: 'application/json',
+            temperature: 0.1,
           },
-        ],
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.1,
-        },
-      });
+        });
 
-      const responseText = response.text || '{}';
-      const parsedData = JSON.parse(responseText);
+        const responseText = response.text || '{}';
+        const parsedData = JSON.parse(responseText);
 
-      return res.json({ success: true, data: parsedData });
+        if (!parsedData.rawResumeText && extractedPlainText) {
+          parsedData.rawResumeText = extractedPlainText;
+        }
+
+        return res.json({ success: true, data: parsedData });
+      } catch (geminiError: any) {
+        console.warn('Gemini extraction failed, returning plain text fallback extraction:', geminiError?.message || geminiError);
+        
+        if (extractedPlainText) {
+          return res.json({
+            success: true,
+            data: {
+              unreadable: false,
+              rawResumeText: extractedPlainText,
+              detectedSkills: [],
+              programmingLanguages: [],
+              toolsAndTechnologies: [],
+              education: [],
+              projects: [],
+              certifications: [],
+              experience: [],
+            },
+          });
+        }
+        throw geminiError;
+      }
     } catch (error: any) {
       console.error('Error in /api/extract-resume-raw:', error);
       return res.status(500).json({
@@ -182,8 +308,8 @@ Respond STRICTLY in valid JSON matching this schema.`;
 
       parts.push({ text: promptText });
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+      const response = await generateGeminiContent(ai, {
+        preferredModel: 'gemini-2.5-flash',
         contents: [
           {
             role: 'user',
@@ -251,8 +377,8 @@ Perform a rigorous analysis and respond STRICTLY in JSON format matching this sc
 }`;
 
       const ai = getGeminiClient();
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
+      const response = await generateGeminiContent(ai, {
+        preferredModel: 'gemini-2.5-flash',
         contents: prompt,
         config: {
           responseMimeType: 'application/json',
